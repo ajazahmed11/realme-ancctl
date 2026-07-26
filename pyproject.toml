@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realme-ancctl"
+version = "0.1.0"
+description = "Experimental Linux CLI for discovering and replaying Realme earbud ANC control commands."
+requires-python = ">=3.10"
+dependencies = [
+  "bleak>=0.22.3",
+]
+
+[project.scripts]
+realme-ancctl = "realme_ancctl.cli:main"
+
