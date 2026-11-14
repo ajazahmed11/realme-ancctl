@@ -48,22 +48,36 @@ pip install -e .
 
 ## Quick Start & Usage
 
-### 1. Control ANC Modes
+Commands are designed to be fast, intuitive, and easy to type from your terminal using `realme` (or `realme-ancctl`):
 
-Once paired with your computer, run commands directly without needing to pass MAC addresses:
+### 1. Control ANC Modes (Quick & Easy)
+
+Once paired with your computer, control ANC directly without typing long argument strings:
 
 ```bash
 # Switch to Transparency mode
-realme-ancctl anc transparency
-
-# Switch to Noise Cancellation mode
-realme-ancctl anc noise_cancellation
-
-# Set Noise Cancellation with a specific submode level (max, smart, moderate, mild)
-realme-ancctl anc noise_cancellation --submode max
+realme trans
 
 # Turn ANC Off (Normal mode)
-realme-ancctl anc off
+realme off
+
+# Turn on Noise Cancellation (default / last used level)
+realme nc
+
+# Noise Cancellation with specific intensity levels
+realme nc-smart       # Smart adaptive level (or: realme smart)
+realme nc-max         # Maximum noise cancellation (or: realme max)
+realme nc-moderate    # Moderate level
+realme nc-mild        # Mild level
+```
+
+You can also use the `anc` prefix if you prefer:
+```bash
+realme anc off
+realme anc trans
+realme anc nc
+realme anc nc-smart   # or: realme anc smart
+realme anc nc-max     # or: realme anc max
 ```
 
 ---
@@ -73,7 +87,7 @@ realme-ancctl anc off
 Query battery levels (Left %, Right %, Case %) and connection info:
 
 ```bash
-realme-ancctl status
+realme battery        # or simply: realme bat (or realme status)
 ```
 
 **Example Output:**

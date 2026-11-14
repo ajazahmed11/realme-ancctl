@@ -12,5 +12,8 @@ dependencies = [
 ]
 
 [project.scripts]
+realme = "realme_ancctl.cli:main"
 realme-ancctl = "realme_ancctl.cli:main"
+ancctl = "realme_ancctl.cli:main"
+anc = "realme_ancctl.cli:main"
 

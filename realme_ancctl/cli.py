@@ -24,10 +24,22 @@ OPPO_COMMAND_MISC_CONFIG_REQ = 0x010D
 OPPO_COMMAND_TOUCH_CONFIG_REQ = 0x0108
 
 ANC_MODE_CODES = {
+    # Off / Normal
     "off": 0x01,
     "normal": 0x01,
+    "none": 0x01,
+    "0": 0x01,
+    # Transparency
+    "trans": 0x02,
     "transparency": 0x02,
+    "transparent": 0x02,
+    "tp": 0x02,
+    "t": 0x02,
+    # Noise Cancellation
+    "nc": 0x08,
     "on": 0x08,
+    "anc": 0x08,
+    "canc": 0x08,
     "noise_cancellation": 0x08,
     "noise-cancellation": 0x08,
 }
@@ -39,6 +51,62 @@ ANC_SUBMODE_CODES = {
     "moderate": 0x02,
     "mild": 0x03,
 }
+
+ALL_ANC_MODES = sorted(
+    set(ANC_MODE_CODES.keys())
+    | set(ANC_SUBMODE_CODES.keys())
+    | {f"nc-{k}" for k in ANC_SUBMODE_CODES}
+)
+
+
+def resolve_anc_mode_and_submode(mode: str, submode: str | None = None) -> tuple[str, str | None]:
+    mode_clean = mode.lower().replace("_", "-").strip()
+
+    if submode:
+        submode_clean = submode.lower().strip()
+        if submode_clean in ANC_SUBMODE_CODES:
+            submode = submode_clean
+
+    # Composite modes like nc-smart, nc-max, nc-deep, nc-moderate, nc-mild
+    if mode_clean.startswith("nc-"):
+        sub = mode_clean[3:]
+        if sub in ANC_SUBMODE_CODES:
+            return "nc", sub
+
+    # Direct submode names passed as mode (e.g. smart, max, moderate, mild)
+    if mode_clean in ANC_SUBMODE_CODES:
+        return "nc", mode_clean
+
+    canonical_map = {
+        "trans": "transparency",
+        "transparent": "transparency",
+        "tp": "transparency",
+        "t": "transparency",
+        "normal": "off",
+        "none": "off",
+        "0": "off",
+        "on": "nc",
+        "anc": "nc",
+        "canc": "nc",
+        "noise-cancellation": "nc",
+        "noise_cancellation": "nc",
+    }
+    canonical = canonical_map.get(mode_clean, mode_clean)
+    return canonical, submode
+
+
+def get_mode_display_name(mode: str, submode: str | None = None) -> str:
+    resolved_mode, resolved_submode = resolve_anc_mode_and_submode(mode, submode)
+    code = ANC_MODE_CODES.get(resolved_mode)
+    if code == 0x01:
+        return "Off"
+    if code == 0x02:
+        return "Transparency"
+    if code == 0x08:
+        if resolved_submode:
+            return f"Noise Cancellation ({resolved_submode})"
+        return "Noise Cancellation"
+    return mode
 
 REQUEST_PAYLOADS = {
     "battery": (OPPO_COMMAND_BATTERY_REQ, b""),
@@ -119,9 +187,14 @@ def encode_oppo_message(command: int, payload: bytes, seq: int = 0) -> bytes:
 
 
 def encode_anc_mode(mode: str, submode: str | None = None, seq: int = 0) -> bytes:
-    mode_code = ANC_MODE_CODES[mode]
-    if submode and mode_code == 0x08 and submode in ANC_SUBMODE_CODES:
-        payload = bytes([0x01, 0x01, mode_code, ANC_SUBMODE_CODES[submode]])
+    resolved_mode, resolved_submode = resolve_anc_mode_and_submode(mode, submode)
+    if resolved_mode not in ANC_MODE_CODES:
+        raise ValueError(
+            f"Unknown ANC mode '{mode}'. Valid modes: off, trans, nc, nc-smart, nc-max, etc."
+        )
+    mode_code = ANC_MODE_CODES[resolved_mode]
+    if resolved_submode and mode_code == 0x08 and resolved_submode in ANC_SUBMODE_CODES:
+        payload = bytes([0x01, 0x01, mode_code, ANC_SUBMODE_CODES[resolved_submode]])
     else:
         payload = bytes([0x01, 0x01, mode_code])
     return encode_oppo_message(OPPO_COMMAND_ANC_CONFIG_SET, payload, seq=seq)
@@ -390,15 +463,16 @@ def send_rfcomm_anc(address: str, payload: bytes, timeout: float = 2.0) -> tuple
 
 
 async def anc(args: argparse.Namespace) -> int:
-    payload = encode_anc_mode(args.mode, submode=getattr(args, "submode", None), seq=args.seq)
-    submode_str = f" ({args.submode})" if getattr(args, "submode", None) else ""
+    submode = getattr(args, "submode", None) or getattr(args, "submode_opt", None)
+    payload = encode_anc_mode(args.mode, submode=submode, seq=args.seq)
+    display_name = get_mode_display_name(args.mode, submode)
 
     # Try Bluetooth Classic RFCOMM first (instant hardware response when connected for audio)
     classic_addr = get_classic_mac_address()
     rfcomm_result = send_rfcomm_anc(classic_addr, payload)
     if rfcomm_result is not None:
         channel, resp = rfcomm_result
-        print(f"Set ANC {args.mode}{submode_str} via Bluetooth Classic (channel {channel}): {resp}")
+        print(f"Set ANC mode to {display_name} via Bluetooth Classic (channel {channel}): {resp}")
         return 0
 
     # Fallback to BLE GATT write if RFCOMM is not connected
@@ -407,8 +481,48 @@ async def anc(args: argparse.Namespace) -> int:
             print("Could not connect over Classic Bluetooth or BLE.", file=sys.stderr)
             return 1
         await client.write_gatt_char(args.characteristic, payload, response=args.response)
-        print(f"Sent ANC {args.mode}{submode_str} via BLE: {payload.hex(' ')}")
+        print(f"Set ANC mode to {display_name} via BLE: {payload.hex(' ')}")
     return 0
+
+
+async def trans_cmd(args: argparse.Namespace) -> int:
+    args.mode = "trans"
+    args.submode = None
+    return await anc(args)
+
+
+async def off_cmd(args: argparse.Namespace) -> int:
+    args.mode = "off"
+    args.submode = None
+    return await anc(args)
+
+
+async def nc_cmd(args: argparse.Namespace) -> int:
+    args.mode = "nc"
+    args.submode = getattr(args, "level", None) or getattr(args, "submode", None)
+    return await anc(args)
+
+
+def make_preset_cmd(submode: str):
+    async def cmd(args: argparse.Namespace) -> int:
+        args.mode = "nc"
+        args.submode = submode
+        return await anc(args)
+
+    return cmd
+
+
+async def anc_cli_dispatch(args: argparse.Namespace) -> int:
+    target = getattr(args, "target", None)
+    extra = getattr(args, "extra", None)
+    if target:
+        if target.lower() in ANC_SUBMODE_CODES:
+            args.submode = target.lower()
+            if extra:
+                args.address = extra
+        else:
+            args.address = target
+    return await anc(args)
 
 
 async def status_info(args: argparse.Namespace) -> int:
@@ -501,11 +615,13 @@ def classic_scan(args: argparse.Namespace) -> int:
 
 
 def classic_anc(args: argparse.Namespace) -> int:
-    payload = encode_anc_mode(args.mode, seq=args.seq)
+    submode = getattr(args, "submode", None) or getattr(args, "submode_opt", None)
+    payload = encode_anc_mode(args.mode, submode=submode, seq=args.seq)
+    display_name = get_mode_display_name(args.mode, submode)
     try:
         with connect_rfcomm(args.address, args.channel, args.timeout) as sock:
             sock.sendall(payload)
-            print(f"sent classic ANC {args.mode} on channel {args.channel}: {payload.hex(' ')}")
+            print(f"sent classic ANC {display_name} on channel {args.channel}: {payload.hex(' ')}")
             if args.read:
                 sock.settimeout(args.read_timeout)
                 try:
@@ -624,12 +740,230 @@ def configure(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="realme-ancctl",
-        description="Realme earbuds ANC control helper for Linux.",
-    )
-    parser.add_argument("--timeout", type=float, default=6.0)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+        prog="realme",
+        description="Realme earbuds ANC & battery control helper for Linux.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Quick Commands (fast & easy to remember):
+  realme battery                 Check battery levels (Left %, Right %, Case %) & status
+  realme trans                   Switch to Transparency mode (aliases: transparency, transparent)
+  realme off                     Turn ANC off (alias: normal)
+  realme nc                      Switch to Noise Cancellation (alias: on)
+  realme nc-smart                Noise Cancellation (Smart level) [alias: smart]
+  realme nc-max                  Noise Cancellation (Max level) [alias: max]
+  realme nc-moderate             Noise Cancellation (Moderate level)
+  realme nc-mild                 Noise Cancellation (Mild level)
 
+Full ANC Syntax:
+  realme anc off                 Turn ANC off
+  realme anc trans               Switch to Transparency mode
+  realme anc nc                  Switch to Noise Cancellation
+  realme anc nc-smart            Noise Cancellation (Smart adaptive)
+  realme anc nc-max              Noise Cancellation (Max intensity)
+
+Developer & Protocol Tools:
+  realme scan                    Scan nearby Bluetooth Low Energy devices
+  realme monitor                 Live vendor BLE packet monitor
+  realme dump                    Dump GATT characteristics
+  realme classic-scan            Scan for open Bluetooth RFCOMM channels
+
+Run 'realme <command> --help' for details on any command.
+        """,
+    )
+    parser.add_argument("--timeout", type=float, default=6.0, help="connection timeout in seconds")
+    subparsers = parser.add_subparsers(dest="command", metavar="<command>")
+
+    def add_common_anc_flags(p: argparse.ArgumentParser, include_addr: bool = True):
+        if include_addr:
+            p.add_argument(
+                "address",
+                nargs="?",
+                default="realme",
+                metavar="[address]",
+                help="earbud Bluetooth address or name (default: auto-detect)",
+            )
+        p.add_argument("--characteristic", default=DEFAULT_WRITE_CHARACTERISTIC, help=argparse.SUPPRESS)
+        p.add_argument("--seq", type=int, default=0, help=argparse.SUPPRESS)
+        p.add_argument("--response", action="store_true", help=argparse.SUPPRESS)
+        p.add_argument("--retries", type=int, default=2, help="connection retries (default: 2)")
+
+    # --- Quick Commands ---
+
+    # 1. battery / bat / status / info
+    status_parser = subparsers.add_parser(
+        "battery",
+        aliases=["bat", "status", "info"],
+        help="check earbud battery levels & status",
+        description="Check Left earbud, Right earbud, and Charging Case battery percentages.",
+        epilog="""
+Examples:
+  realme battery
+  realme bat
+  realme status
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    status_parser.add_argument(
+        "address",
+        nargs="?",
+        default="realme",
+        metavar="[address]",
+        help="earbud Bluetooth address or name (default: auto-detect)",
+    )
+    status_parser.add_argument("--retries", type=int, default=2, help="connection retries (default: 2)")
+    status_parser.set_defaults(func=status_info)
+
+    # 2. trans / transparency / transparent
+    trans_parser = subparsers.add_parser(
+        "trans",
+        aliases=["transparency", "transparent"],
+        help="switch to transparency mode",
+        description="Switch earbuds to Transparency mode so you can hear your surroundings.",
+        epilog="""
+Examples:
+  realme trans
+  realme transparency
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_anc_flags(trans_parser)
+    trans_parser.set_defaults(func=trans_cmd)
+
+    # 3. off / normal
+    off_parser = subparsers.add_parser(
+        "off",
+        aliases=["normal"],
+        help="turn ANC off (normal mode)",
+        description="Turn Active Noise Cancellation off (Normal mode, saves earbud battery).",
+        epilog="""
+Examples:
+  realme off
+  realme normal
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_anc_flags(off_parser)
+    off_parser.set_defaults(func=off_cmd)
+
+    # 4. nc (with optional level: smart, max, moderate, mild)
+    nc_parser = subparsers.add_parser(
+        "nc",
+        aliases=["on", "noise-cancellation", "noise_cancellation"],
+        help="switch to noise cancellation mode (optional level: smart, max, moderate, mild)",
+        description="Switch earbuds to Active Noise Cancellation mode.",
+        epilog="""
+Examples:
+  realme nc                     Turn on Noise Cancellation
+  realme nc smart               Noise Cancellation (Smart adaptive level)
+  realme nc max                 Noise Cancellation (Maximum level)
+  realme nc moderate            Noise Cancellation (Moderate level)
+  realme nc mild                Noise Cancellation (Mild level)
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    nc_parser.add_argument(
+        "level",
+        nargs="?",
+        choices=["smart", "max", "deep", "moderate", "mild"],
+        default=None,
+        metavar="[level]",
+        help="optional intensity: smart, max, moderate, mild (default: max / last used)",
+    )
+    add_common_anc_flags(nc_parser)
+    nc_parser.set_defaults(func=nc_cmd)
+
+    # 5. Direct level presets: nc-smart / smart, nc-max / max, nc-moderate / moderate, nc-mild / mild
+    for name, aliases, submode in [
+        ("nc-smart", ["smart"], "smart"),
+        ("nc-max", ["max", "nc-deep", "deep"], "max"),
+        ("nc-moderate", ["moderate"], "moderate"),
+        ("nc-mild", ["mild"], "mild"),
+    ]:
+        p = subparsers.add_parser(
+            name,
+            aliases=aliases,
+            help=f"switch to noise cancellation ({submode} level)",
+            description=f"Switch earbuds to Noise Cancellation at {submode.capitalize()} intensity level.",
+        )
+        add_common_anc_flags(p)
+        p.set_defaults(func=make_preset_cmd(submode))
+
+    # --- Full ANC Command ---
+    anc_parser = subparsers.add_parser(
+        "anc",
+        help="set ANC/noise-control mode (e.g. anc off, anc trans, anc nc, anc nc-smart, anc smart)",
+        description="Set Active Noise Cancellation (ANC) mode and optional intensity level.",
+        epilog="""
+Examples:
+  realme anc off               Turn ANC off (Normal mode)
+  realme anc trans             Switch to Transparency mode
+  realme anc nc                Switch to Noise Cancellation
+  realme anc nc-smart          Noise Cancellation (Smart level)
+  realme anc nc-max            Noise Cancellation (Max level)
+  realme anc smart             Shortcut for smart noise cancellation
+  realme anc max               Shortcut for maximum noise cancellation
+        """,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    anc_parser.add_argument(
+        "mode",
+        nargs="?",
+        default="nc",
+        metavar="[mode]",
+        choices=ALL_ANC_MODES,
+        help="mode: off, trans, nc, nc-smart, nc-max, smart, max, moderate, mild (default: nc)",
+    )
+    anc_parser.add_argument(
+        "target",
+        nargs="?",
+        default=None,
+        metavar="[level/address]",
+        help="optional submode level (smart, max, moderate, mild) or device address",
+    )
+    anc_parser.add_argument(
+        "extra",
+        nargs="?",
+        default=None,
+        metavar="[address]",
+        help="device address if level was passed as first target",
+    )
+    anc_parser.add_argument(
+        "--submode",
+        dest="submode_opt",
+        choices=sorted(ANC_SUBMODE_CODES),
+        metavar="<level>",
+        help="ANC intensity level (smart, max/deep, moderate, mild)",
+    )
+    add_common_anc_flags(anc_parser, include_addr=False)
+    anc_parser.set_defaults(func=anc_cli_dispatch)
+
+    # --- Help Command ---
+    help_parser = subparsers.add_parser(
+        "help",
+        help="show help for a specific command",
+        description="Show help and usage information for a command.",
+    )
+    help_parser.add_argument("topic", nargs="?", default=None, metavar="[command]", help="command to get help for")
+
+    def show_help(args: argparse.Namespace) -> int:
+        topic = getattr(args, "topic", None)
+        if not topic:
+            parser.print_help()
+            return 0
+        subaction = None
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                subaction = action
+                break
+        if subaction and topic in subaction.choices:
+            subaction.choices[topic].print_help()
+            return 0
+        print(f"Unknown command: '{topic}'. Run 'realme --help' to see available commands.")
+        return 1
+
+    help_parser.set_defaults(func=show_help)
+
+    # --- Diagnostic & developer tools ---
     scan_parser = subparsers.add_parser("scan", help="scan for BLE devices")
     scan_parser.add_argument("--match", default="realme", help="filter by name or address")
     scan_parser.add_argument("--all", action="store_true", help="show all BLE advertisements")
@@ -656,26 +990,6 @@ def build_parser() -> argparse.ArgumentParser:
     monitor_parser.add_argument("--retries", type=int, default=1)
     monitor_parser.set_defaults(func=monitor)
 
-    anc_parser = subparsers.add_parser("anc", help="set ANC/noise-control mode using the OPPO/Realme protocol")
-    anc_parser.add_argument("mode", choices=sorted(ANC_MODE_CODES))
-    anc_parser.add_argument("address", nargs="?", default="realme")
-    anc_parser.add_argument("--submode", choices=sorted(ANC_SUBMODE_CODES), help="ANC submode (smart, max/deep, moderate, mild)")
-    anc_parser.add_argument("--characteristic", default=DEFAULT_WRITE_CHARACTERISTIC)
-    anc_parser.add_argument("--seq", type=int, default=0)
-    anc_parser.add_argument("--response", action="store_true")
-    anc_parser.add_argument("--retries", type=int, default=2)
-    anc_parser.set_defaults(func=anc)
-
-    status_parser = subparsers.add_parser("status", help="get earbud status (battery, ANC mode, etc.)")
-    status_parser.add_argument("address", nargs="?", default="realme")
-    status_parser.add_argument("--retries", type=int, default=2)
-    status_parser.set_defaults(func=status_info)
-
-    info_parser = subparsers.add_parser("info", help="alias for status")
-    info_parser.add_argument("address", nargs="?", default="realme")
-    info_parser.add_argument("--retries", type=int, default=2)
-    info_parser.set_defaults(func=status_info)
-
     classic_scan_parser = subparsers.add_parser("classic-scan", help="find open RFCOMM channels")
     classic_scan_parser.add_argument("address", nargs="?", default=DEFAULT_CLASSIC_ADDRESS)
     classic_scan_parser.add_argument("--start", type=int, default=1)
@@ -684,7 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
     classic_scan_parser.set_defaults(func=classic_scan)
 
     classic_anc_parser = subparsers.add_parser("classic-anc", help="set ANC over classic Bluetooth RFCOMM")
-    classic_anc_parser.add_argument("mode", choices=sorted(ANC_MODE_CODES))
+    classic_anc_parser.add_argument("mode", choices=ALL_ANC_MODES)
     classic_anc_parser.add_argument("address", nargs="?", default=DEFAULT_CLASSIC_ADDRESS)
     classic_anc_parser.add_argument("--channel", type=int, required=True)
     classic_anc_parser.add_argument("--seq", type=int, default=0)
@@ -722,9 +1036,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv:
+        parser.print_help()
+        return 0
+
+    args = parser.parse_args(argv)
     result = args.func(args)
     if asyncio.iscoroutine(result):
         return asyncio.run(result)
